@@ -12,7 +12,9 @@ pipeline {
     }
     
     stages {
-        stage('Checkout') { steps { checkout scm } }
+        stage('Checkout') {
+            steps { checkout scm }
+        }
 
         stage('Build Backend') {
             steps {
@@ -32,7 +34,7 @@ pipeline {
             }
         }
 
-        stage('Push Images') {
+        stage('Push to DockerHub') {
             steps {
                 bat "echo ${DOCKERHUB_CREDENTIALS_PSW} | docker login -u ${DOCKERHUB_CREDENTIALS_USR} --password-stdin"
                 bat "docker push ${BACKEND_IMAGE}:${IMAGE_TAG} && docker push ${BACKEND_IMAGE}:latest"
@@ -40,28 +42,27 @@ pipeline {
             }
         }
 
-        stage('Deploy to Kubernetes') {
+        stage('Deploy & Fix Network') {
             steps {
-                echo '🚀 Deploying and Troubleshooting Network...'
+                echo '🚀 Deploying and resetting network binding...'
                 withCredentials([sshUserPrivateKey(credentialsId: 'ec2-ssh-key', keyFileVariable: 'KEY_FILE')]) {
                     bat """
                         @echo off
-                        :: 1. Windows Permissions
+                        :: Fix Windows SSH Key Permissions
                         icacls "%KEY_FILE%" /inheritance:r
                         icacls "%KEY_FILE%" /grant:r *S-1-5-18:(R)
                         icacls "%KEY_FILE%" /grant:r *S-1-5-32-544:(R)
                         
-                        :: 2. Create directory and upload (using absolute path /home/ubuntu)
+                        :: Ensure Directory & Upload Manifests
                         ssh -i "%KEY_FILE%" -o StrictHostKeyChecking=no %EC2_USER%@%EC2_HOST% "mkdir -p /home/ubuntu/k8s"
                         scp -i "%KEY_FILE%" -o StrictHostKeyChecking=no k8s/*.yaml %EC2_USER%@%EC2_HOST%:/home/ubuntu/k8s/
 
-                        :: 3. Refresh and Apply (Flattened command string to avoid bash syntax errors)
-                        echo [+] Updating K8s Resources...
-                        ssh -i "%KEY_FILE%" -o StrictHostKeyChecking=no %EC2_USER%@%EC2_HOST% "kubectl delete svc frontend-service --ignore-not-found && kubectl apply -f /home/ubuntu/k8s/ && kubectl set image deployment/backend-deployment backend=%BACKEND_IMAGE%:%IMAGE_TAG% && kubectl set image deployment/frontend-deployment frontend=%FRONTEND_IMAGE%:%IMAGE_TAG% && kubectl rollout status deployment/frontend-deployment"
+                        :: Reset Service & Update Image (One long string to avoid bash syntax errors)
+                        ssh -i "%KEY_FILE%" -o StrictHostKeyChecking=no %EC2_USER%@%EC2_HOST% "kubectl delete svc frontend-service --ignore-not-found && sleep 3 && kubectl apply -f /home/ubuntu/k8s/ && kubectl set image deployment/frontend-deployment frontend=%FRONTEND_IMAGE%:%IMAGE_TAG% && kubectl rollout status deployment/frontend-deployment"
 
-                        :: 4. Final Diagnostics (Using 'ss' instead of 'netstat')
-                        echo [+] --- NETWORK DIAGNOSTICS ---
-                        ssh -i "%KEY_FILE%" -o StrictHostKeyChecking=no %EC2_USER%@%EC2_HOST% "echo '[Port Check]' && sudo ss -tulpn | grep 30300 || echo 'PORT 30300 NOT ACTIVE' && echo '[Internal Curl]' && curl -s -I http://localhost:30300 | grep HTTP || echo 'CURL FAILED'"
+                        :: Final Diagnostic: Test on Private IP (NodePort standard)
+                        echo [+] --- FINAL NETWORK VERIFICATION ---
+                        ssh -i "%KEY_FILE%" -o StrictHostKeyChecking=no %EC2_USER%@%EC2_HOST% "echo '[Service Details]' && kubectl get svc frontend-service && echo '[Internal IP Test]' && curl -s -I http://\$(hostname -I | awk '{print \$1}'):30300 | grep HTTP || echo 'CONNECTION REFUSED'"
                     """
                 }
             }
@@ -69,6 +70,11 @@ pipeline {
     }
 
     post {
-        always { bat 'docker logout' }
+        always {
+            bat 'docker logout'
+        }
+        success {
+            echo "✅ App is live: http://${EC2_HOST}:30300"
+        }
     }
 }
