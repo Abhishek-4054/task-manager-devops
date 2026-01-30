@@ -2,33 +2,24 @@ pipeline {
     agent any
     
     environment {
-        // Docker Hub credentials (Username/Password type in Jenkins)
         DOCKERHUB_CREDENTIALS = credentials('dockerhub-credentials')
         DOCKERHUB_USERNAME = 'abhishekc4054'
-
-        // Image names
         BACKEND_IMAGE = "${DOCKERHUB_USERNAME}/task-manager-backend"
         FRONTEND_IMAGE = "${DOCKERHUB_USERNAME}/task-manager-frontend"
-
-        // EC2 details
         EC2_HOST = '184.73.7.238'
         EC2_USER = 'ubuntu'
-
-        // Build tag
         IMAGE_TAG = "${BUILD_NUMBER}"
     }
     
     stages {
         stage('Checkout Code') {
             steps {
-                echo '📥 Checking out code from GitHub...'
                 checkout scm
             }
         }
 
         stage('Build Backend Image') {
             steps {
-                echo '🔨 Building Backend Docker Image...'
                 dir('backend') {
                     bat """
                         docker build -t %BACKEND_IMAGE%:%IMAGE_TAG% .
@@ -40,7 +31,6 @@ pipeline {
 
         stage('Build Frontend Image') {
             steps {
-                echo '🔨 Building Frontend Docker Image...'
                 dir('frontend') {
                     bat """
                         docker build -t %FRONTEND_IMAGE%:%IMAGE_TAG% .
@@ -52,7 +42,6 @@ pipeline {
 
         stage('Push Images to Docker Hub') {
             steps {
-                echo '📤 Pushing images to Docker Hub...'
                 bat """
                     echo %DOCKERHUB_CREDENTIALS_PSW% | docker login -u %DOCKERHUB_CREDENTIALS_USR% --password-stdin
                     docker push %BACKEND_IMAGE%:%IMAGE_TAG%
@@ -65,17 +54,19 @@ pipeline {
 
         stage('Deploy to Kubernetes (EC2)') {
             steps {
-                echo '🚀 Fixing permissions and deploying to EC2...'
-                /* We use withCredentials to get the SSH key.
-                   Then we use icacls to strip 'BUILTIN\Users' access so SSH doesn't complain.
-                */
+                echo '🚀 Fixing permissions and deploying...'
                 withCredentials([sshUserPrivateKey(credentialsId: 'ec2-ssh-key', keyFileVariable: 'KEY_FILE')]) {
                     bat """
                         @echo off
-                        echo [+] Securing private key permissions...
-                        icacls "%KEY_FILE%" /inheritance:r /grant:r "%USERNAME%":"(R)"
+                        :: Remove all inherited permissions
+                        icacls "%KEY_FILE%" /inheritance:r
                         
-                        echo [+] Connecting to EC2 and updating Kubernetes...
+                        :: Grant Full control to the System and the current owner
+                        :: This bypasses the "Account Name" mapping error
+                        icacls "%KEY_FILE%" /grant:r *S-1-5-18:(R)
+                        icacls "%KEY_FILE%" /grant:r *S-1-5-32-544:(R)
+                        
+                        echo [+] Connecting to EC2...
                         ssh -i "%KEY_FILE%" -o StrictHostKeyChecking=no %EC2_USER%@%EC2_HOST% ^
                         "kubectl set image deployment/backend-deployment backend=%BACKEND_IMAGE%:%IMAGE_TAG% && ^
                          kubectl set image deployment/frontend-deployment frontend=%FRONTEND_IMAGE%:%IMAGE_TAG% && ^
@@ -90,15 +81,7 @@ pipeline {
 
     post {
         always {
-            echo '扫 Cleaning up Docker login...'
             bat 'docker logout'
-        }
-        success {
-            echo '✅ Pipeline completed successfully!'
-            echo "🌐 Access your app at: http://${EC2_HOST}:30300"
-        }
-        failure {
-            echo '❌ Pipeline failed! Check logs above.'
         }
     }
 }
