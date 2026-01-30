@@ -2,102 +2,89 @@ pipeline {
     agent any
     
     environment {
-        // Docker Hub credentials ID from Jenkins
+        // Docker Hub credentials
         DOCKERHUB_CREDENTIALS = credentials('dockerhub-credentials')
-        
-        // Docker Hub username (change this to yours!)
         DOCKERHUB_USERNAME = 'abhishekc4054'
-        
+
         // Image names
         BACKEND_IMAGE = "${DOCKERHUB_USERNAME}/task-manager-backend"
         FRONTEND_IMAGE = "${DOCKERHUB_USERNAME}/task-manager-frontend"
-        
-        // EC2 details (change these!)
+
+        // EC2 details
         EC2_HOST = '184.73.7.238'
         EC2_USER = 'ubuntu'
-        
-        // Build number as tag
+
+        // Build tag
         IMAGE_TAG = "${BUILD_NUMBER}"
     }
     
     stages {
+
         stage('Checkout Code') {
             steps {
                 echo '📥 Checking out code from GitHub...'
                 checkout scm
             }
         }
-        
+
         stage('Build Backend Image') {
             steps {
                 echo '🔨 Building Backend Docker Image...'
-                script {
-                    dir('backend') {
-                        sh """
-                            docker build -t ${BACKEND_IMAGE}:${IMAGE_TAG} .
-                            docker tag ${BACKEND_IMAGE}:${IMAGE_TAG} ${BACKEND_IMAGE}:latest
-                        """
-                    }
-                }
-            }
-        }
-        
-        stage('Build Frontend Image') {
-            steps {
-                echo '🔨 Building Frontend Docker Image...'
-                script {
-                    dir('frontend') {
-                        sh """
-                            docker build -t ${FRONTEND_IMAGE}:${IMAGE_TAG} .
-                            docker tag ${FRONTEND_IMAGE}:${IMAGE_TAG} ${FRONTEND_IMAGE}:latest
-                        """
-                    }
-                }
-            }
-        }
-        
-        stage('Push Images to Docker Hub') {
-            steps {
-                echo '📤 Pushing images to Docker Hub...'
-                script {
-                    sh """
-                        echo \$DOCKERHUB_CREDENTIALS_PSW | docker login -u \$DOCKERHUB_CREDENTIALS_USR --password-stdin
-                        docker push ${BACKEND_IMAGE}:${IMAGE_TAG}
-                        docker push ${BACKEND_IMAGE}:latest
-                        docker push ${FRONTEND_IMAGE}:${IMAGE_TAG}
-                        docker push ${FRONTEND_IMAGE}:latest
+                dir('backend') {
+                    bat """
+                        docker build -t %BACKEND_IMAGE%:%IMAGE_TAG% .
+                        docker tag %BACKEND_IMAGE%:%IMAGE_TAG% %BACKEND_IMAGE%:latest
                     """
                 }
             }
         }
-        
-        stage('Deploy to Kubernetes') {
+
+        stage('Build Frontend Image') {
+            steps {
+                echo '🔨 Building Frontend Docker Image...'
+                dir('frontend') {
+                    bat """
+                        docker build -t %FRONTEND_IMAGE%:%IMAGE_TAG% .
+                        docker tag %FRONTEND_IMAGE%:%IMAGE_TAG% %FRONTEND_IMAGE%:latest
+                    """
+                }
+            }
+        }
+
+        stage('Push Images to Docker Hub') {
+            steps {
+                echo '📤 Pushing images to Docker Hub...'
+                bat """
+                    echo %DOCKERHUB_CREDENTIALS_PSW% | docker login -u %DOCKERHUB_CREDENTIALS_USR% --password-stdin
+                    docker push %BACKEND_IMAGE%:%IMAGE_TAG%
+                    docker push %BACKEND_IMAGE%:latest
+                    docker push %FRONTEND_IMAGE%:%IMAGE_TAG%
+                    docker push %FRONTEND_IMAGE%:latest
+                """
+            }
+        }
+
+        stage('Deploy to Kubernetes (EC2)') {
             steps {
                 echo '🚀 Deploying to Kubernetes on EC2...'
                 sshagent(['ec2-ssh-key']) {
-                    sh """
-                        ssh -o StrictHostKeyChecking=no ${EC2_USER}@${EC2_HOST} '
-                            # Update image in deployments
-                            kubectl set image deployment/backend-deployment backend=${BACKEND_IMAGE}:${IMAGE_TAG}
-                            kubectl set image deployment/frontend-deployment frontend=${FRONTEND_IMAGE}:${IMAGE_TAG}
-                            
-                            # Wait for rollout
-                            kubectl rollout status deployment/backend-deployment
-                            kubectl rollout status deployment/frontend-deployment
-                            
-                            # Verify pods are running
-                            kubectl get pods
-                        '
+                    bat """
+                        ssh -o StrictHostKeyChecking=no %EC2_USER%@%EC2_HOST% ^
+                        "kubectl set image deployment/backend-deployment backend=%BACKEND_IMAGE%:%IMAGE_TAG% && ^
+                         kubectl set image deployment/frontend-deployment frontend=%FRONTEND_IMAGE%:%IMAGE_TAG% && ^
+                         kubectl rollout status deployment/backend-deployment && ^
+                         kubectl rollout status deployment/frontend-deployment && ^
+                         kubectl get pods"
                     """
                 }
             }
         }
     }
-    
+
     post {
         always {
-            echo '🧹 Cleaning up...'
-            sh 'docker logout'
+            echo '🧹 Cleaning up Docker login...'
+            bat 'docker logout'
         }
         success {
             echo '✅ Pipeline completed successfully!'
