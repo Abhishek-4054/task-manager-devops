@@ -18,49 +18,43 @@ pipeline {
             }
         }
 
-        stage('Build and Push Backend') {
+        stage('Build and Push Images') {
             steps {
-                dir('backend') {
-                    bat """
-                        docker build -t %BACKEND_IMAGE%:%IMAGE_TAG% .
-                        docker tag %BACKEND_IMAGE%:%IMAGE_TAG% %BACKEND_IMAGE%:latest
-                        echo %DOCKERHUB_CREDENTIALS_PSW% | docker login -u %DOCKERHUB_CREDENTIALS_USR% --password-stdin
-                        docker push %BACKEND_IMAGE%:%IMAGE_TAG%
-                        docker push %BACKEND_IMAGE%:latest
-                    """
-                }
-            }
-        }
-
-        stage('Build and Push Frontend') {
-            steps {
-                dir('frontend') {
-                    bat """
-                        docker build -t %FRONTEND_IMAGE%:%IMAGE_TAG% .
-                        docker tag %FRONTEND_IMAGE%:%IMAGE_TAG% %FRONTEND_IMAGE%:latest
-                        docker push %FRONTEND_IMAGE%:%IMAGE_TAG%
-                        docker push %FRONTEND_IMAGE%:latest
-                    """
-                }
+                echo '🔨 Building and Pushing Docker Images...'
+                bat """
+                    cd backend && docker build -t %BACKEND_IMAGE%:%IMAGE_TAG% . && docker tag %BACKEND_IMAGE%:%IMAGE_TAG% %BACKEND_IMAGE%:latest
+                    cd ../frontend && docker build -t %FRONTEND_IMAGE%:%IMAGE_TAG% . && docker tag %FRONTEND_IMAGE%:%IMAGE_TAG% %FRONTEND_IMAGE%:latest
+                    
+                    echo %DOCKERHUB_CREDENTIALS_PSW% | docker login -u %DOCKERHUB_CREDENTIALS_USR% --password-stdin
+                    docker push %BACKEND_IMAGE%:%IMAGE_TAG%
+                    docker push %BACKEND_IMAGE%:latest
+                    docker push %FRONTEND_IMAGE%:%IMAGE_TAG%
+                    docker push %FRONTEND_IMAGE%:latest
+                """
             }
         }
 
         stage('Deploy to Kubernetes') {
             steps {
-                echo '🚀 Applying K8s manifests and updating images...'
+                echo '🚀 Deploying to EC2...'
                 withCredentials([sshUserPrivateKey(credentialsId: 'ec2-ssh-key', keyFileVariable: 'KEY_FILE')]) {
                     bat """
                         @echo off
-                        :: Fix Windows Permissions
+                        :: 1. Fix Windows Permissions (Confirmed Working)
                         icacls "%KEY_FILE%" /inheritance:r
                         icacls "%KEY_FILE%" /grant:r *S-1-5-18:(R)
                         icacls "%KEY_FILE%" /grant:r *S-1-5-32-544:(R)
                         
-                        :: Copy the k8s folder to the EC2 instance so we can apply the YAMLs
-                        echo [+] Copying manifests to EC2...
-                        scp -i "%KEY_FILE%" -o StrictHostKeyChecking=no -r k8s/ %EC2_USER%@%EC2_HOST%:~/k8s/
+                        :: 2. Ensure the k8s directory exists on the EC2
+                        echo [+] Preparing remote directory...
+                        ssh -i "%KEY_FILE%" -o StrictHostKeyChecking=no %EC2_USER%@%EC2_HOST% "mkdir -p ~/k8s"
 
-                        echo [+] Applying manifests and updating images...
+                        :: 3. Copy files individually to avoid "realpath" directory errors
+                        echo [+] Uploading manifests...
+                        scp -i "%KEY_FILE%" -o StrictHostKeyChecking=no k8s/*.yaml %EC2_USER%@%EC2_HOST%:~/k8s/
+
+                        :: 4. Apply and Update
+                        echo [+] Applying Kubernetes changes...
                         ssh -i "%KEY_FILE%" -o StrictHostKeyChecking=no %EC2_USER%@%EC2_HOST% ^
                         "kubectl apply -f ~/k8s/ && ^
                          kubectl set image deployment/backend-deployment backend=%BACKEND_IMAGE%:%IMAGE_TAG% && ^
